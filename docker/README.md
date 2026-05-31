@@ -41,6 +41,8 @@ Run it manually from GitHub Actions with:
 - `runs_on`: `ubuntu-latest` or a self-hosted runner label
 - `build_accel`: `true`
 
+You can also trigger the same build by pushing a tag matching `docker-*`.
+
 The images are large. `ubuntu-latest` may still run out of disk even after the
 workflow frees common preinstalled toolchains. A self-hosted Linux runner with
 at least 80GB free disk is the safer path for repeatable builds.

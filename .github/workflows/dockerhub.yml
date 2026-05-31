@@ -1,6 +1,9 @@
 name: Build and Push Docker Images
 
 on:
+  push:
+    tags:
+      - "docker-*"
   workflow_dispatch:
     inputs:
       image_repo:
@@ -22,7 +25,7 @@ on:
 jobs:
   docker:
     name: Build Docker images
-    runs-on: ${{ inputs.runs_on }}
+    runs-on: ${{ inputs.runs_on || 'ubuntu-latest' }}
     timeout-minutes: 360
     permissions:
       contents: read
@@ -40,7 +43,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image_repo="${{ inputs.image_repo }}"
+          image_repo="${{ inputs.image_repo || 'linglambda/index-tts' }}"
           if [ -z "$image_repo" ]; then
             image_repo="linglambda/index-tts"
           fi
@@ -52,7 +55,7 @@ jobs:
           echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
 
       - name: Free runner disk space
-        if: ${{ inputs.runs_on == 'ubuntu-latest' }}
+        if: ${{ (inputs.runs_on || 'ubuntu-latest') == 'ubuntu-latest' }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -94,7 +97,7 @@ jobs:
           docker push "$IMAGE_REPO:$STABLE_TAG-$SHORT_SHA"
 
       - name: Build acceleration image
-        if: ${{ inputs.build_accel }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_accel }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -107,7 +110,7 @@ jobs:
             .
 
       - name: Smoke test acceleration image imports
-        if: ${{ inputs.build_accel }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_accel }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -115,7 +118,7 @@ jobs:
             python3 /opt/indextts/verify_runtime.py --use-accel
 
       - name: Push acceleration image
-        if: ${{ inputs.build_accel }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_accel }}
         shell: bash
         run: |
           set -euxo pipefail
