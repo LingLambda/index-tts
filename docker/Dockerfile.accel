@@ -1,0 +1,19 @@
+ARG BASE_IMAGE=indextts2:cu128-ds
+FROM ${BASE_IMAGE}
+
+ARG PIP_INDEX_URL=https://mirrors.ustc.edu.cn/pypi/simple
+ARG FLASH_ATTN_VERSION=2.8.3
+ARG MAX_JOBS=8
+
+ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_TRUSTED_HOST=mirrors.ustc.edu.cn \
+    TORCH_CUDA_ARCH_LIST="8.0;12.0" \
+    MAX_JOBS=${MAX_JOBS} \
+    CUDA_HOME=/usr/local/cuda
+
+RUN python3 -m pip config set global.index-url "${PIP_INDEX_URL}" \
+    && python3 -m pip config set global.trusted-host mirrors.ustc.edu.cn \
+    && python3 -m pip install --no-build-isolation "flash-attn==${FLASH_ATTN_VERSION}" \
+    && python3 -m pip check
+
+COPY docker/verify_runtime.py /opt/indextts/verify_runtime.py

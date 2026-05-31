@@ -1,16 +1,26 @@
 import html
+import io
 import json
 import os
 import sys
 import threading
+import tempfile
 import time
+import wave
+from typing import Optional
 
 import warnings
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
+for proxy_key in ("NO_PROXY", "no_proxy"):
+    proxy_value = os.environ.get(proxy_key)
+    if proxy_value:
+        os.environ[proxy_key] = proxy_value.replace("“", "").replace("”", "")
+
 import pandas as pd
+import torch
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
@@ -28,6 +38,8 @@ parser.add_argument("--model_dir", type=str, default="./checkpoints", help="Mode
 parser.add_argument("--fp16", action="store_true", default=False, help="Use FP16 for inference if available")
 parser.add_argument("--deepspeed", action="store_true", default=False, help="Use DeepSpeed to accelerate if available")
 parser.add_argument("--cuda_kernel", action="store_true", default=False, help="Use CUDA kernel for inference if available")
+parser.add_argument("--use_accel", action="store_true", default=False, help="Use the experimental GPT2 acceleration engine if flash_attn is available")
+parser.add_argument("--torch_compile", action="store_true", default=False, help="Use torch.compile where supported")
 parser.add_argument("--gui_seg_tokens", type=int, default=120, help="GUI: Max tokens per generation segment")
 cmd_args = parser.parse_args()
 
@@ -48,6 +60,8 @@ for file in [
         sys.exit(1)
 
 import gradio as gr
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from indextts.infer_v2 import IndexTTS2
 from tools.i18n.i18n import I18nAuto
 
@@ -58,6 +72,8 @@ tts = IndexTTS2(model_dir=cmd_args.model_dir,
                 use_fp16=cmd_args.fp16,
                 use_deepspeed=cmd_args.deepspeed,
                 use_cuda_kernel=cmd_args.cuda_kernel,
+                use_accel=cmd_args.use_accel,
+                use_torch_compile=cmd_args.torch_compile,
                 )
 # 支持的语言列表
 LANGUAGES = {
@@ -124,11 +140,26 @@ def format_glossary_markdown():
 
     return "\n".join(lines)
 
+def wav_tensor_to_bytes(wav, sampling_rate=22050):
+    wav = wav.detach().cpu()
+    if wav.dim() == 1:
+        wav = wav.unsqueeze(0)
+    wav = wav.clamp(-32767.0, 32767.0).type(torch.int16)
+    wav_data = wav.transpose(0, 1).contiguous().numpy()
+    with io.BytesIO() as buffer:
+        with wave.open(buffer, "wb") as wav_file:
+            wav_file.setnchannels(wav_data.shape[1])
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sampling_rate)
+            wav_file.writeframes(wav_data.tobytes())
+        return buffer.getvalue()
+
 def gen_single(emo_control_method,prompt, text,
                emo_ref_path, emo_weight,
                vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                emo_text,emo_random,
                max_text_tokens_per_segment=120,
+               stream_output=False, quick_streaming_tokens=0,
                 *args, progress=gr.Progress()):
     output_path = None
     if not output_path:
@@ -167,15 +198,186 @@ def gen_single(emo_control_method,prompt, text,
         emo_text = None
 
     print(f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
-    output = tts.infer(spk_audio_prompt=prompt, text=text,
-                       output_path=output_path,
-                       emo_audio_prompt=emo_ref_path, emo_alpha=emo_weight,
-                       emo_vector=vec,
-                       use_emo_text=(emo_control_method==3), emo_text=emo_text,use_random=emo_random,
-                       verbose=cmd_args.verbose,
-                       max_text_tokens_per_segment=int(max_text_tokens_per_segment),
-                       **kwargs)
-    return gr.update(value=output,visible=True)
+    infer_kwargs = dict(
+        spk_audio_prompt=prompt, text=text,
+        output_path=output_path,
+        emo_audio_prompt=emo_ref_path, emo_alpha=emo_weight,
+        emo_vector=vec,
+        use_emo_text=(emo_control_method==3), emo_text=emo_text,use_random=emo_random,
+        verbose=cmd_args.verbose,
+        max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+        **kwargs
+    )
+    if stream_output:
+        for wav in tts.infer(
+                **infer_kwargs,
+                stream_return=True,
+                more_segment_before=int(quick_streaming_tokens)):
+            if not isinstance(wav, torch.Tensor):
+                continue
+            yield wav_tensor_to_bytes(wav)
+        return
+
+    output = tts.infer(**infer_kwargs)
+    yield gr.update(value=output,visible=True)
+
+def parse_emo_control_method(value):
+    if isinstance(value, int):
+        return value
+    if hasattr(value, "value"):
+        return int(value.value)
+    value = str(value)
+    if value.isdigit():
+        return int(value)
+    for idx, choice in enumerate(EMO_CHOICES_ALL):
+        if value == choice:
+            return idx
+    raise ValueError(f"Unknown emotion control method: {value}")
+
+async def save_upload_file(upload: UploadFile) -> str:
+    suffix = os.path.splitext(upload.filename or "")[1] or ".wav"
+    fd, path = tempfile.mkstemp(prefix="indextts2_", suffix=suffix, dir="outputs/tasks")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+    except Exception:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise
+    return path
+
+def create_api_app() -> FastAPI:
+    app = FastAPI(title="IndexTTS2 API")
+
+    @app.get("/api/health")
+    async def api_health():
+        return {"status": "ok", "model": "IndexTTS2"}
+
+    @app.post("/api/tts_stream")
+    async def api_tts_stream(
+        prompt_audio: UploadFile = File(...),
+        text: str = Form(...),
+        emo_ref_audio: Optional[UploadFile] = File(None),
+        emo_control_method: str = Form("0"),
+        emo_weight: float = Form(0.65),
+        emo_random: bool = Form(False),
+        emo_text: str = Form(""),
+        vec1: float = Form(0.0),
+        vec2: float = Form(0.0),
+        vec3: float = Form(0.0),
+        vec4: float = Form(0.0),
+        vec5: float = Form(0.0),
+        vec6: float = Form(0.0),
+        vec7: float = Form(0.0),
+        vec8: float = Form(0.0),
+        max_text_tokens_per_segment: int = Form(120),
+        quick_streaming_tokens: int = Form(0),
+        do_sample: bool = Form(True),
+        top_p: float = Form(0.8),
+        top_k: int = Form(30),
+        temperature: float = Form(0.8),
+        length_penalty: float = Form(0.0),
+        num_beams: int = Form(3),
+        repetition_penalty: float = Form(10.0),
+        max_mel_tokens: int = Form(1500),
+    ):
+        try:
+            method = parse_emo_control_method(emo_control_method)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        prompt_path = await save_upload_file(prompt_audio)
+        emo_ref_path = await save_upload_file(emo_ref_audio) if emo_ref_audio is not None else None
+        cleanup_paths = [prompt_path]
+        if emo_ref_path:
+            cleanup_paths.append(emo_ref_path)
+
+        if method == 0:
+            emo_ref_path = None
+            emo_vec = None
+        elif method == 1:
+            if emo_ref_path is None:
+                for path in cleanup_paths:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                raise HTTPException(status_code=400, detail="emo_ref_audio is required when emo_control_method=1")
+            emo_vec = None
+        elif method == 2:
+            emo_vec = tts.normalize_emo_vec([vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8], apply_bias=True)
+        else:
+            emo_vec = None
+
+        if emo_text == "":
+            emo_text = None
+
+        infer_kwargs = dict(
+            spk_audio_prompt=prompt_path,
+            text=text,
+            output_path=os.path.join("outputs", f"api_{int(time.time())}.wav"),
+            emo_audio_prompt=emo_ref_path,
+            emo_alpha=emo_weight,
+            emo_vector=emo_vec,
+            use_emo_text=(method == 3),
+            emo_text=emo_text,
+            use_random=emo_random,
+            verbose=cmd_args.verbose,
+            max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+            do_sample=bool(do_sample),
+            top_p=float(top_p),
+            top_k=int(top_k) if int(top_k) > 0 else None,
+            temperature=float(temperature),
+            length_penalty=float(length_penalty),
+            num_beams=int(num_beams),
+            repetition_penalty=float(repetition_penalty),
+            max_mel_tokens=int(max_mel_tokens),
+        )
+
+        boundary = "indextts2-wav"
+
+        def iter_wav_parts():
+            try:
+                segment_index = 0
+                for wav in tts.infer(
+                    **infer_kwargs,
+                    stream_return=True,
+                    more_segment_before=int(quick_streaming_tokens),
+                ):
+                    if not isinstance(wav, torch.Tensor):
+                        continue
+                    segment_index += 1
+                    data = wav_tensor_to_bytes(wav)
+                    header = (
+                        f"--{boundary}\r\n"
+                        "Content-Type: audio/wav\r\n"
+                        f"Content-Disposition: inline; filename=\"segment_{segment_index}.wav\"\r\n"
+                        f"Content-Length: {len(data)}\r\n\r\n"
+                    )
+                    yield header.encode("ascii")
+                    yield data
+                    yield b"\r\n"
+                yield f"--{boundary}--\r\n".encode("ascii")
+            finally:
+                for path in cleanup_paths:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+
+        return StreamingResponse(
+            iter_wav_parts(),
+            media_type=f"multipart/x-mixed-replace; boundary={boundary}",
+            headers={"X-Accel-Buffering": "no"},
+        )
+
+    return app
 
 def update_prompt_audio():
     update_button = gr.update(interactive=True)
@@ -208,7 +410,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             with gr.Column():
                 input_text_single = gr.TextArea(label=i18n("文本"),key="input_text_single", placeholder=i18n("请输入目标文本"), info=f"{i18n('当前模型版本')}{tts.model_version or '1.0'}")
                 gen_button = gr.Button(i18n("生成语音"), key="gen_button",interactive=True)
-            output_audio = gr.Audio(label=i18n("生成结果"), visible=True,key="output_audio")
+            output_audio = gr.Audio(label=i18n("生成结果"), visible=True,key="output_audio", streaming=True, autoplay=True)
 
         with gr.Row():
             experimental_checkbox = gr.Checkbox(label=i18n("显示实验功能"), value=False)
@@ -312,6 +514,15 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                             info=i18n("建议80~200之间，值越大，分句越长；值越小，分句越碎；过小过大都可能导致音频质量不高"),
                         )
                     with gr.Accordion(i18n("预览分句结果"), open=True) as segments_settings:
+                        with gr.Row():
+                            stream_output = gr.Checkbox(
+                                label=i18n("流式输出"), value=False,
+                                info=i18n("边生成边自动拼接音频预览")
+                            )
+                            quick_streaming_tokens = gr.Slider(
+                                label=i18n("首段快速Token数"), value=80, minimum=0, maximum=tts.cfg.gpt.max_text_tokens, step=2,
+                                info=i18n("开启流式输出时生效，建议80以降低首段等待时间")
+                            )
                         segments_preview = gr.Dataframe(
                             headers=[i18n("序号"), i18n("分句内容"), i18n("Token数")],
                             key="segments_preview",
@@ -546,6 +757,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                             vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                              emo_text,emo_random,
                              max_text_tokens_per_segment,
+                             stream_output, quick_streaming_tokens,
                              *advanced_params,
                      ],
                      outputs=[output_audio])
@@ -554,4 +766,20 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
 
 if __name__ == "__main__":
     demo.queue(20)
-    demo.launch(server_name=cmd_args.host, server_port=cmd_args.port)
+    allowed_paths = [
+        os.path.abspath("outputs"),
+        os.path.abspath("examples"),
+        tempfile.gettempdir(),
+    ]
+    app = create_api_app()
+    app = gr.mount_gradio_app(
+        app,
+        demo,
+        path="/",
+        server_name=cmd_args.host,
+        server_port=cmd_args.port,
+        allowed_paths=allowed_paths,
+        show_error=True,
+    )
+    import uvicorn
+    uvicorn.run(app, host=cmd_args.host, port=cmd_args.port)
