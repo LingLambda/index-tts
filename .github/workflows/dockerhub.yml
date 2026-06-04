@@ -21,10 +21,29 @@ on:
         required: true
         default: true
         type: boolean
+      build_target:
+        description: "Image target to build"
+        required: true
+        default: "stable"
+        type: choice
+        options:
+          - stable
+          - vllm
+      vllm_image_tag:
+        description: "Primary tag for the vLLM image"
+        required: true
+        default: "vllm-cu"
+        type: string
+      vllm_base_image:
+        description: "Base image for the vLLM image"
+        required: true
+        default: "docker.1ms.run/vllm/vllm-openai:v0.16.0"
+        type: string
 
 jobs:
   docker:
     name: Build Docker images
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_target == 'stable' }}
     runs-on: ${{ inputs.runs_on || 'ubuntu-latest' }}
     timeout-minutes: 360
     permissions:
@@ -124,3 +143,68 @@ jobs:
           set -euxo pipefail
           docker push "$IMAGE_REPO:$ACCEL_TAG"
           docker push "$IMAGE_REPO:$ACCEL_TAG-$SHORT_SHA"
+
+  vllm:
+    name: Build vLLM Docker image
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_target == 'vllm' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      PIP_INDEX_URL: https://mirrors.ustc.edu.cn/pypi/simple
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_repo="${{ inputs.image_repo || 'nanaoto/index-tts' }}"
+          image_tag="${{ inputs.vllm_image_tag || 'vllm-cu' }}"
+          base_image="${{ inputs.vllm_base_image || 'docker.1ms.run/vllm/vllm-openai:v0.16.0' }}"
+          if [ -z "$image_repo" ] || [ -z "$image_tag" ] || [ -z "$base_image" ]; then
+            echo "image_repo, vllm_image_tag and vllm_base_image must be set." >&2
+            exit 2
+          fi
+          echo "IMAGE_REPO=$image_repo" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=$image_tag" >> "$GITHUB_ENV"
+          echo "BASE_IMAGE=$base_image" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache || true
+          docker system prune -af || true
+          df -h
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME || 'linglambda' }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push vLLM image
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker buildx build \
+            --platform linux/amd64 \
+            --push \
+            --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+            --build-arg "PIP_INDEX_URL=$PIP_INDEX_URL" \
+            -f docker/Dockerfile.vllm \
+            -t "$IMAGE_REPO:$IMAGE_TAG" \
+            -t "$IMAGE_REPO:latest-vllm-cu" \
+            -t "$IMAGE_REPO:$IMAGE_TAG-$SHORT_SHA" \
+            .
