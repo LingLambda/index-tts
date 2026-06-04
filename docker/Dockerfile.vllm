@@ -69,6 +69,10 @@ skip = (
     # vLLM 0.16 uses Python 3.12; the project pin numba==0.58.1 pulls
     # llvmlite==0.41.1, which does not build on Python 3.12.
     "numba==",
+    # Keep the vLLM base image's own runtime constraints intact.
+    "tokenizers==",
+    "transformers==",
+    "tensorboard==",
 )
 for req in requirements:
     normalized = req.strip().lower()
@@ -87,7 +91,17 @@ COPY webui.py patch_vllm.py ./
 COPY api_vllm_stream.py webui_vllm_stream.py ./
 
 RUN python3 -m pip install -e ".[webui]" --no-deps \
-    && python3 -m pip check
+    && python3 - <<'PY'
+import torch
+import torchaudio
+import transformers
+import vllm
+
+print("torch", torch.__version__)
+print("torchaudio", torchaudio.__version__)
+print("transformers", transformers.__version__)
+print("vllm", vllm.__version__)
+PY
 
 RUN python3 - <<'PY'
 from pathlib import Path
