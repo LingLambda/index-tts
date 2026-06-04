@@ -44,36 +44,42 @@ RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy \
 
 WORKDIR /app
 
-COPY requirements.txt overrides.txt ./
+COPY pyproject.toml README.md LICENSE LICENSE_ZH.txt MANIFEST.in ./
 
 RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy \
     && python3 -m pip config set global.index-url "${PIP_INDEX_URL}" \
     && python3 -m pip config set global.trusted-host mirrors.ustc.edu.cn \
-    && python3 -m pip install --upgrade pip setuptools wheel uv \
-    && uv pip install --system -r requirements.txt -c overrides.txt \
-    && uv pip install --system --no-deps descript-audiotools==0.7.2 \
-    && uv pip install --system --no-deps \
-        argbind \
-        ffmpy \
-        flatten-dict \
-        ipython \
-        julius \
-        markdown2 \
-        pyloudnorm \
-        pystoi \
-        randomname \
-        tensorboard \
-        torch-stoi \
-        absl-py \
-        markdown \
-        tensorboard-data-server \
-        werkzeug
+    && python3 -m pip install --upgrade pip setuptools wheel packaging ninja tomli uv \
+    && python3 - <<'PY' >/tmp/indextts-vllm-requirements.txt
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+
+with open("pyproject.toml", "rb") as fh:
+    project = tomllib.load(fh)["project"]
+
+requirements = []
+requirements.extend(project["dependencies"])
+requirements.extend(project["optional-dependencies"]["webui"])
+
+skip = ("torch==", "torchaudio==")
+for req in requirements:
+    normalized = req.strip().lower()
+    if normalized.startswith(skip):
+        continue
+    print(req)
+PY
+RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy \
+    && uv pip install --system -r /tmp/indextts-vllm-requirements.txt \
+    && python3 -m pip install -e ".[webui]" --no-deps \
+    && python3 -m pip check
 
 COPY indextts ./indextts
 COPY tools ./tools
 COPY assets ./assets
 COPY examples ./examples
-COPY api_server_v2.py webui_v2.py api_example_v2.py patch_vllm.py ./
+COPY webui.py patch_vllm.py ./
 COPY api_vllm_stream.py webui_vllm_stream.py ./
 
 RUN python3 - <<'PY'
