@@ -63,7 +63,13 @@ requirements = []
 requirements.extend(project["dependencies"])
 requirements.extend(project["optional-dependencies"]["webui"])
 
-skip = ("torch==", "torchaudio==")
+skip = (
+    "torch==",
+    "torchaudio==",
+    # vLLM 0.16 uses Python 3.12; the project pin numba==0.58.1 pulls
+    # llvmlite==0.41.1, which does not build on Python 3.12.
+    "numba==",
+)
 for req in requirements:
     normalized = req.strip().lower()
     if normalized.startswith(skip):
