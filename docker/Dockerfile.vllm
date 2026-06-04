@@ -1,0 +1,114 @@
+ARG BASE_IMAGE=docker.1ms.run/vllm/vllm-openai:v0.16.0
+FROM ${BASE_IMAGE}
+
+ARG PIP_INDEX_URL=https://mirrors.ustc.edu.cn/pypi/simple
+
+LABEL org.opencontainers.image.title="IndexTTS2 vLLM" \
+      org.opencontainers.image.description="IndexTTS2 API/WebUI runtime with vLLM acceleration. Model weights are mounted at runtime." \
+      org.opencontainers.image.source="https://github.com/index-tts/index-tts" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_TRUSTED_HOST=mirrors.ustc.edu.cn \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    VLLM_USE_MODELSCOPE=1 \
+    VLLM_CACHE_ROOT=/models/.cache/vllm \
+    HF_HOME=/models/.cache/huggingface \
+    MODELSCOPE_CACHE=/models/.cache/modelscope \
+    BIGVGAN_BUILD_DIR=/models/.cache/bigvgan_cuda_build \
+    INDEXTTS2_DISABLE_QWEN_EMO=1
+
+RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy \
+    && if [ -f /etc/apt/sources.list ]; then \
+        sed -i 's@http://archive.ubuntu.com/ubuntu/@https://mirrors.ustc.edu.cn/ubuntu/@g; s@http://security.ubuntu.com/ubuntu/@https://mirrors.ustc.edu.cn/ubuntu/@g' /etc/apt/sources.list; \
+       fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        ffmpeg \
+        git \
+        libsndfile1 \
+        libsm6 \
+        libxext6 \
+        libcublas-dev-12-9 \
+        libcusparse-dev-12-9 \
+        libcusolver-dev-12-9 \
+        ninja-build \
+        wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/bin/python
+
+WORKDIR /app
+
+COPY requirements.txt overrides.txt ./
+
+RUN unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy \
+    && python3 -m pip config set global.index-url "${PIP_INDEX_URL}" \
+    && python3 -m pip config set global.trusted-host mirrors.ustc.edu.cn \
+    && python3 -m pip install --upgrade pip setuptools wheel uv \
+    && uv pip install --system -r requirements.txt -c overrides.txt \
+    && uv pip install --system --no-deps descript-audiotools==0.7.2 \
+    && uv pip install --system --no-deps \
+        argbind \
+        ffmpy \
+        flatten-dict \
+        ipython \
+        julius \
+        markdown2 \
+        pyloudnorm \
+        pystoi \
+        randomname \
+        tensorboard \
+        torch-stoi \
+        absl-py \
+        markdown \
+        tensorboard-data-server \
+        werkzeug
+
+COPY indextts ./indextts
+COPY tools ./tools
+COPY assets ./assets
+COPY examples ./examples
+COPY api_server_v2.py webui_v2.py api_example_v2.py patch_vllm.py ./
+COPY api_vllm_stream.py webui_vllm_stream.py ./
+
+RUN python3 - <<'PY'
+from pathlib import Path
+infer_path = Path("/app/indextts/infer_vllm_v2.py")
+text = infer_path.read_text()
+text = text.replace("max_model_len=2048,", "max_model_len=512,")
+infer_path.write_text(text)
+
+cuda_path = Path("/app/indextts/BigVGAN/alias_free_activation/cuda/anti_alias_activation_cuda.cu")
+text = cuda_path.read_text()
+text = text.replace("#include <cuda_profiler_api.h>\n", "")
+cuda_path.write_text(text)
+
+load_path = Path("/app/indextts/BigVGAN/alias_free_activation/cuda/load.py")
+text = load_path.read_text()
+text = text.replace(
+    '    buildpath = srcpath / "build"\n',
+    '    buildpath = pathlib.Path(os.environ.get("BIGVGAN_BUILD_DIR", srcpath / "build"))\n',
+)
+load_path.write_text(text)
+
+text = infer_path.read_text()
+text = text.replace(
+    "            torchaudio.save(output_path, wav.type(torch.int16), sampling_rate)\n",
+    "            import soundfile as sf\n"
+    "            wav_data = wav.type(torch.int16).numpy().T\n"
+    "            sf.write(output_path, wav_data, sampling_rate, subtype=\"PCM_16\")\n",
+)
+infer_path.write_text(text)
+PY
+
+RUN mkdir -p /app/logs /app/outputs /models
+
+EXPOSE 6006
+
+ENTRYPOINT ["python3"]
+CMD ["api_vllm_stream.py", "--host", "0.0.0.0", "--port", "6006", "--model_dir", "/models/IndexTTS-2-vLLM", "--is_fp16", "--gpu_memory_utilization", "0.05", "--qwenemo_gpu_memory_utilization", "0.15"]

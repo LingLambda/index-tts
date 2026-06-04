@@ -1,44 +1,64 @@
-name: Build and Publish Docker Image
+name: Build and Publish IndexTTS2 vLLM Image
+
 on:
   workflow_dispatch:
+    inputs:
+      image_name:
+        description: "Docker Hub image name"
+        required: true
+        default: "nanaoto/index-tts"
+      image_tag:
+        description: "Primary image tag"
+        required: true
+        default: "vllm-cu"
+      base_image:
+        description: "Base vLLM image"
+        required: true
+        default: "docker.1ms.run/vllm/vllm-openai:v0.16.0"
+      pip_index_url:
+        description: "Python package index used during build"
+        required: true
+        default: "https://mirrors.ustc.edu.cn/pypi/simple"
 
 jobs:
-  build-amd64:
+  build-and-push:
     runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        include:
-          - cuda_version: 11.8
-            torch_version: 2.4.1
-            tag_prefix: pytorch2.4.1-cuda11.8
-          - cuda_version: 12.8
-            torch_version: 2.8.0
-            tag_prefix: pytorch2.8.0-cuda12.8
+    permissions:
+      contents: read
+      packages: write
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Extract Docker Meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: nanaoto/index-tts
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker Image
-        uses: docker/build-push-action@v5
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: docker.io/${{ inputs.image_name }}
+          tags: |
+            type=raw,value=${{ inputs.image_tag }}
+            type=raw,value=latest-vllm-cu
+            type=sha,prefix=${{ inputs.image_tag }}-
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
-          push: false
+          file: ./docker/Dockerfile.vllm
           platforms: linux/amd64
+          push: true
           build-args: |
-            CUDA_VERSION=${{ matrix.cuda_version }}
-            TORCH_VERSION=${{ matrix.torch_version }}
-          tags: |
-            nanaoto/index-tts:${{ matrix.tag_prefix }}-${{ steps.meta.outputs.tags }}-amd64
-            nanaoto/index-tts:latest-${{ matrix.tag_prefix }}-amd64
-            
-            
+            BASE_IMAGE=${{ inputs.base_image }}
+            PIP_INDEX_URL=${{ inputs.pip_index_url }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

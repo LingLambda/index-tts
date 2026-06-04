@@ -1,0 +1,72 @@
+name: indextts2-vllm
+
+x-indextts2-vllm-common: &indextts2-vllm-common
+  image: ${IMAGE_NAME:-nanaoto/index-tts:vllm-cu}
+  entrypoint: ["python3"]
+  gpus: all
+  init: true
+  ipc: host
+  security_opt:
+    - seccomp=unconfined
+  environment:
+    VLLM_USE_MODELSCOPE: "1"
+    VLLM_CACHE_ROOT: /models/.cache/vllm
+    HF_HOME: /models/.cache/huggingface
+    MODELSCOPE_CACHE: /models/.cache/modelscope
+    BIGVGAN_BUILD_DIR: /models/.cache/bigvgan_cuda_build
+    INDEXTTS2_DISABLE_QWEN_EMO: "${INDEXTTS2_DISABLE_QWEN_EMO:-1}"
+    PYTHONUNBUFFERED: "1"
+  volumes:
+    - ${WORK_ROOT:-/root/docker-data/indextts2-vllm}/checkpoints/IndexTTS-2-vLLM:/models/IndexTTS-2-vLLM:ro
+    - ${WORK_ROOT:-/root/docker-data/indextts2-vllm}/cache:/models/.cache
+    - ${WORK_ROOT:-/root/docker-data/indextts2-vllm}/logs:/app/logs
+    - ${WORK_ROOT:-/root/docker-data/indextts2-vllm}/outputs:/app/outputs
+    - ./app/api_vllm_stream.py:/app/api_vllm_stream.py:ro
+    - ./app/webui_vllm_stream.py:/app/webui_vllm_stream.py:ro
+  restart: unless-stopped
+
+services:
+  api:
+    <<: *indextts2-vllm-common
+    container_name: indextts2-vllm-api
+    ports:
+      - "${API_PORT:-6006}:6006"
+    command:
+      - api_vllm_stream.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "6006"
+      - --model_dir
+      - /models/IndexTTS-2-vLLM
+      - --is_fp16
+      - --gpu_memory_utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.05}"
+      - --qwenemo_gpu_memory_utilization
+      - "${QWENEMO_GPU_MEMORY_UTILIZATION:-0.15}"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 - <<'PY'\nimport json, urllib.request\nr=urllib.request.urlopen('http://127.0.0.1:6006/api/health', timeout=5)\nraise SystemExit(0 if json.loads(r.read()).get('status') == 'ok' else 1)\nPY"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 8m
+
+  webui:
+    <<: *indextts2-vllm-common
+    container_name: indextts2-vllm-webui
+    profiles: ["webui"]
+    ports:
+      - "${WEBUI_PORT:-7860}:6006"
+    command:
+      - webui_vllm_stream.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "6006"
+      - --model_dir
+      - /models/IndexTTS-2-vLLM
+      - --is_fp16
+      - --gpu_memory_utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.05}"
+      - --qwenemo_gpu_memory_utilization
+      - "${QWENEMO_GPU_MEMORY_UTILIZATION:-0.15}"
