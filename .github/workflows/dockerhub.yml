@@ -164,7 +164,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image_repo="${{ inputs.image_repo || 'nanaoto/index-tts' }}"
+          image_repo="${{ inputs.image_repo || 'linglambda/index-tts' }}"
           image_tag="${{ inputs.vllm_image_tag || 'vllm-cu' }}"
           base_image="${{ inputs.vllm_base_image || 'docker.1ms.run/vllm/vllm-openai:v0.16.0' }}"
           if [ -z "$image_repo" ] || [ -z "$image_tag" ] || [ -z "$base_image" ]; then

@@ -6,7 +6,7 @@ on:
       image_name:
         description: "Docker Hub image name"
         required: true
-        default: "nanaoto/index-tts"
+        default: "linglambda/index-tts"
       image_tag:
         description: "Primary image tag"
         required: true

@@ -1,7 +1,7 @@
 name: indextts2-vllm
 
 x-indextts2-vllm-common: &indextts2-vllm-common
-  image: ${IMAGE_NAME:-nanaoto/index-tts:vllm-cu}
+  image: ${IMAGE_NAME:-linglambda/index-tts:vllm-cu}
   entrypoint: ["python3"]
   gpus: all
   init: true

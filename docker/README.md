@@ -24,7 +24,7 @@ docker compose up -d
 模型权重不打进镜像，需要挂载到 `/models/IndexTTS-2-vLLM`。镜像默认名为：
 
 ```text
-nanaoto/index-tts:vllm-cu
+linglambda/index-tts:vllm-cu
 ```
 
 ## 启动 WebUI
@@ -73,7 +73,7 @@ cd /mnt/d/CodeWork/Node/IndexTTS2
 ```bash
 docker buildx build \
   -f docker/Dockerfile.vllm \
-  -t nanaoto/index-tts:vllm-cu \
+  -t linglambda/index-tts:vllm-cu \
   .
 ```
 
